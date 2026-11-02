@@ -94,6 +94,7 @@ from typing import Any
 # Third party imports
 from readfish.read_until.read_cache import AccumulatingCache
 from readfish.read_until import ReadUntilClient
+from readfish.read_until.base import DEFAULT_INTERVAL_UPDATE_SECS
 from minknow_api import protocol_service
 
 # Library
@@ -124,6 +125,14 @@ from readfish.plugins.utils import (
 )
 
 
+def _positive_seconds(value: str) -> float:
+    """argparse type for a number of seconds greater than zero."""
+    seconds = float(value)
+    if not seconds > 0:
+        raise argparse.ArgumentTypeError(f"must be greater than 0, got {value}")
+    return seconds
+
+
 _help = "Run targeted sequencing"
 _cli = DEVICE_BASE_ARGS + (
     (
@@ -149,6 +158,16 @@ _cli = DEVICE_BASE_ARGS + (
             default=0,
             type=int,
             metavar="PADDING",
+        ),
+    ),
+    (
+        "--interval-update-seconds",
+        dict(
+            help="Seconds between the read stream's interval update log lines "
+            f"(default: {DEFAULT_INTERVAL_UPDATE_SECS})",
+            default=DEFAULT_INTERVAL_UPDATE_SECS,
+            type=_positive_seconds,
+            metavar="SECONDS",
         ),
     ),
 )
@@ -631,6 +650,7 @@ If there isn't a newer version of readfish and readfish is failing, please open 
             "unknown_positive",
         },
     )
+    read_until_client.log_interval_secs = args.interval_update_seconds
 
     # Load TOML configuration
     conf = Conf.from_file(args.toml, read_until_client.channel_count, logger=logger)

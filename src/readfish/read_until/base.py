@@ -78,6 +78,8 @@ def _new_thread_name(template="read_until-%d"):
 # filtering functionality.
 ALLOWED_MIN_CHUNK_SIZE = 0
 DEFAULT_PREFILTER_CLASSES = {"strand", "adapter"}
+# Default seconds between the read stream's interval update log lines
+DEFAULT_INTERVAL_UPDATE_SECS = 60 * 15
 
 
 class ReadUntilClient(object):
@@ -143,6 +145,9 @@ class ReadUntilClient(object):
     `client.is_running`, calling the above call will cause the
     analysis function to return.
     """
+
+    # Seconds between the read stream's interval update log lines
+    log_interval_secs = DEFAULT_INTERVAL_UPDATE_SECS
 
     def __init__(
         self,
@@ -678,7 +683,7 @@ class ReadUntilClient(object):
                     prefilter_dropped[tuple(read.chunk_classifications)] += 1
 
             now = time.time()
-            log_interval_secs = 60 * 15  # 15 mins
+            log_interval_secs = self.log_interval_secs
             if last_msg_time + log_interval_secs < now:
                 self.logger.info(
                     "Interval update: %s read sections, %s unique reads (ever), "
