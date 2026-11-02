@@ -407,3 +407,35 @@ def test_response_summary_never_raises():
         "unblock: UNKNOWN(99)=2"
     )
     assert base._response_summary(None) == "None"
+
+
+def test_interval_update_without_reads_does_not_raise(monkeypatch, readfish_handler):
+    """A message with no reads after a full interval with none must not end the
+    stream thread with ZeroDivisionError."""
+    now = [1000.0]
+    monkeypatch.setattr(base.time, "time", lambda: now[0])
+
+    client = base.ReadUntilClient.__new__(base.ReadUntilClient)
+    client.logger = logging.getLogger("readfish.read_until")
+    client.running = Event()
+    client.running.set()
+    progress = SimpleNamespace(raw_per_channel=SimpleNamespace(acquired=0))
+    client.connection = SimpleNamespace(
+        acquisition=SimpleNamespace(get_progress=lambda: progress)
+    )
+    client.data_queue = base.ReadCache(size=2)
+
+    def messages():
+        now[0] += 60 * 15 + 1
+        yield SimpleNamespace(action_responses=[], channels={})
+
+    client._process_reads(messages())
+
+    updates = [
+        r.getMessage()
+        for r in readfish_handler.records
+        if r.getMessage().startswith("Interval update")
+    ]
+    assert len(updates) == 1
+    assert "0 read sections" in updates[0]
+    assert "average 0 samples behind" in updates[0]

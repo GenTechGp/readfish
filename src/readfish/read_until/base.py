@@ -682,7 +682,7 @@ class ReadUntilClient(object):
                     "%s reads in queue, %s reads missed, %s chunks replaced.",
                     read_count,
                     len(unique_reads),
-                    samples_behind / read_count,
+                    samples_behind / max(read_count, 1),
                     raw_data_bytes / 1024 / 1024,
                     self.queue_length,
                     self.missed_reads,
