@@ -92,6 +92,8 @@ from timeit import default_timer as timer
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 # Third party imports
 from readfish.read_until.read_cache import AccumulatingCache
 from readfish.read_until import ReadUntilClient
@@ -175,6 +177,20 @@ def _loop_timing(times: dict, total: float) -> str:
         f"(first={times['basecall_first'] * 1000:.1f}), "
         f"map={map_ * 1000:.1f}, decide={decide * 1000:.1f}, "
         f"actions={times['actions'] * 1000:.1f}, other={other * 1000:.1f}"
+    )
+
+
+def _signal_columns(signal: tuple[int, int] | None, acquired: int | None) -> dict:
+    """Debug TSV columns for a read's accumulated signal: ``signal`` is its
+    (start sample, samples), ``acquired`` the latest acquired samples. Values
+    that are unknown are None.
+    """
+    if signal is None:
+        return dict(signal_start_sample=None, signal_samples=None, samples_behind=None)
+    start, samples = signal
+    behind = None if acquired is None else acquired - (start + samples)
+    return dict(
+        signal_start_sample=start, signal_samples=samples, samples_behind=behind
     )
 
 
@@ -564,6 +580,15 @@ class Analysis:
             started = timer()
             chunks = self.client.get_read_chunks(self.client.channel_count, last=True)
             times["chunks"] = timer() - started
+            # Accumulated signal per read for the debug TSV: (start sample, samples)
+            itemsize = np.dtype(self.client.signal_dtype).itemsize
+            signals = {
+                (channel, read.id): (
+                    read.chunk_start_sample,
+                    len(read.raw_data) // itemsize,
+                )
+                for channel, read in chunks
+            }
             started = timer()
             calls = self.caller.basecall(
                 chunks, self.client.signal_dtype, self.client.calibration_values
@@ -616,6 +641,10 @@ class Analysis:
                     ),
                     action_overridden=action_overridden,
                     timestamp=time.time(),
+                    **_signal_columns(
+                        signals.get((result.channel, result.read_id)),
+                        self.client.last_acquired,
+                    ),
                     # Anything below here is not included in the Debug log
                     region_name=(
                         _region.name

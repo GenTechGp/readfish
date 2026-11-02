@@ -7,7 +7,25 @@ from types import SimpleNamespace
 import pytest
 
 from readfish.entry_points import targets
-from readfish._statistics import ReadfishStatistics
+from readfish._statistics import ReadfishStatistics, DEBUG_STATS_LOG_FIELDS
+
+# The debug TSV columns before the gtg additions, which analysis scripts read
+#    by position
+UPSTREAM_DEBUG_FIELDS = (
+    "client_iteration",
+    "read_in_loop",
+    "read_id",
+    "channel",
+    "seq_len",
+    "counter",
+    "mode",
+    "decision",
+    "condition",
+    "barcode",
+    "previous_action",
+    "action_override",
+    "timestamp",
+)
 
 
 @pytest.fixture
@@ -73,9 +91,17 @@ class ListHandler(logging.Handler):
         self.records.append(record)
 
 
-def test_main_loop_logs_stage_times(monkeypatch, clock):
+def read_data(read_id, start, samples):
+    """A fake ReadData with ``samples`` int16 samples of signal."""
+    return SimpleNamespace(
+        id=read_id, chunk_start_sample=start, raw_data=b"\0\0" * samples
+    )
+
+
+def run_one_loop(monkeypatch, clock, chunks, last_acquired=10_000):
     """One pass of Analysis.run with fake MinKNOW, Dorado and aligner, where
-    each stage advances the clock by a known amount."""
+    each stage advances the clock by a known amount. Returns the batch
+    performance lines, the actions sent and the debug TSV rows."""
     sent = []
 
     class Client:
@@ -88,6 +114,7 @@ def test_main_loop_logs_stage_times(monkeypatch, clock):
 
         def __init__(self):
             self.loops = 0
+            self.last_acquired = last_acquired
 
         @property
         def is_sequencing(self):
@@ -99,7 +126,7 @@ def test_main_loop_logs_stage_times(monkeypatch, clock):
 
         def get_read_chunks(self, batch_size, last):
             clock[0] += 0.001
-            return [(1, "chunk1"), (2, "chunk2")]
+            return list(chunks)
 
         def unblock_read_batch(self, reads, duration):
             clock[0] += 0.002
@@ -109,10 +136,10 @@ def test_main_loop_logs_stage_times(monkeypatch, clock):
             sent.append(("stop_receiving", list(reads)))
 
     def basecall(chunks, dtype, calibration):
-        for channel, _ in chunks:
+        for channel, read in chunks:
             clock[0] += 0.2
             yield SimpleNamespace(
-                channel=channel, read_id=f"r{channel}", seq="ACGT", barcode=None
+                channel=channel, read_id=read.id, seq="ACGT", barcode=None
             )
 
     def map_reads(calls):
@@ -156,6 +183,8 @@ def test_main_loop_logs_stage_times(monkeypatch, clock):
     analysis.logger.addHandler(handler)
     analysis.logger.setLevel(logging.INFO)
     analysis.logger.propagate = False
+    debug_handler = ListHandler()
+    analysis.loop_statistics.debug_logger.addHandler(debug_handler)
     monkeypatch.setattr(targets, "send_message", lambda *args: None)
     monkeypatch.setattr(
         targets, "make_decision", lambda conf, result: targets.Decision.single_off
@@ -165,10 +194,18 @@ def test_main_loop_logs_stage_times(monkeypatch, clock):
         analysis.run()
     finally:
         analysis.logger.removeHandler(handler)
+        analysis.loop_statistics.debug_logger.removeHandler(debug_handler)
 
-    batch_lines = [
-        r.getMessage() for r in handler.records if "R/" in r.getMessage()
-    ]
+    batch_lines = [r.getMessage() for r in handler.records if "R/" in r.getMessage()]
+    debug_rows = [r.getMessage().split("\t") for r in debug_handler.records]
+    return batch_lines, sent, debug_rows
+
+
+TWO_READS = [(1, read_data("r1", 5_000, 4_000)), (2, read_data("r2", 9_000, 500))]
+
+
+def test_main_loop_logs_stage_times(monkeypatch, clock):
+    batch_lines, sent, _ = run_one_loop(monkeypatch, clock, TWO_READS)
     assert batch_lines == [
         "0002R/0.4290s; Avg: 0002R/0.4290s; Seq:0; Unb:2; Pro:0; "
         "Slow batches (>1.00s): 0/1; "
@@ -180,3 +217,51 @@ def test_main_loop_logs_stage_times(monkeypatch, clock):
         ("unblock", [(1, "r1"), (2, "r2")]),
         ("stop_receiving", []),
     ]
+
+
+def test_debug_tsv_signal_columns(monkeypatch, clock):
+    _, sent, rows = run_one_loop(monkeypatch, clock, TWO_READS, last_acquired=10_000)
+    assert all(len(row) == len(DEBUG_STATS_LOG_FIELDS) for row in rows)
+    # The upstream columns keep their positions; the new ones are appended.
+    assert DEBUG_STATS_LOG_FIELDS[:13] == UPSTREAM_DEBUG_FIELDS
+    assert [row[2] for row in rows] == ["r1", "r2"]
+    assert [dict(zip(DEBUG_STATS_LOG_FIELDS[13:], row[13:])) for row in rows] == [
+        # r1: 4,000 samples from 5,000, so it ends at 9,000; 1,000 behind
+        {"signal_start_sample": "5000", "signal_samples": "4000",
+         "samples_behind": "1000"},
+        # r2: 500 samples from 9,000, so it ends at 9,500; 500 behind
+        {"signal_start_sample": "9000", "signal_samples": "500",
+         "samples_behind": "500"},
+    ]
+    assert sent[0] == ("unblock", [(1, "r1"), (2, "r2")])
+
+
+def test_debug_tsv_samples_behind_unknown_before_first_message(monkeypatch, clock):
+    _, _, rows = run_one_loop(monkeypatch, clock, TWO_READS[:1], last_acquired=None)
+    assert rows[0][13:] == ["5000", "4000", "None"]
+
+
+def test_signal_columns_unknown_read():
+    assert targets._signal_columns(None, 10_000) == {
+        "signal_start_sample": None,
+        "signal_samples": None,
+        "samples_behind": None,
+    }
+
+
+def test_stream_records_last_acquired():
+    """The stream thread keeps the latest acquired for samples_behind."""
+    from threading import Event
+    import readfish.read_until.base as base
+
+    client = base.ReadUntilClient.__new__(base.ReadUntilClient)
+    assert client.last_acquired is None
+    client.logger = logging.getLogger("readfish.read_until")
+    client.running = Event()
+    client.running.set()
+    progress = SimpleNamespace(raw_per_channel=SimpleNamespace(acquired=1234))
+    client.connection = SimpleNamespace(
+        acquisition=SimpleNamespace(get_progress=lambda: progress)
+    )
+    client._process_reads([SimpleNamespace(action_responses=[], channels={})])
+    assert client.last_acquired == 1234

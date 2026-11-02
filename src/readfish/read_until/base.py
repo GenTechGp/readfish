@@ -186,6 +186,9 @@ class ReadUntilClient(object):
     stream_logger = None
     # Whether a failed stream log row has been logged, so it is logged once
     _stream_log_failed = False
+    # MinKNOW's acquired samples from the latest stream message's progress
+    #    call, for the debug TSV's samples_behind; None before the first message
+    last_acquired = None
 
     def __init__(
         self,
@@ -695,6 +698,7 @@ class ReadUntilClient(object):
                 dropped_before = sum(prefilter_dropped.values())
                 progress_called = time.perf_counter()
             progress = self.aquisition_progress
+            self.last_acquired = progress.acquired
             if stream_log:
                 progress_secs = time.perf_counter() - progress_called
             for read_channel in reads_chunk.channels:

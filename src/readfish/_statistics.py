@@ -48,6 +48,13 @@ DEBUG_STATS_LOG_FIELDS = (
     "previous_action",
     "action_override",
     "timestamp",
+    # Appended after the upstream columns so positional readers still work.
+    #    The accumulated signal basecalled for this decision: its start sample,
+    #    length in samples, and acquired samples (from the latest read stream
+    #    message) minus its end.
+    "signal_start_sample",
+    "signal_samples",
+    "samples_behind",
 )
 
 
