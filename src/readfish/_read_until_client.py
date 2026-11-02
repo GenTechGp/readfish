@@ -51,8 +51,6 @@ class RUClient(ReadUntilClient):
         # If started from CLI args.wait-for-ready is used - also defaults to 120s
         self.timeout = kwargs.pop("timeout", TIMEOUT)
         super().__init__(*args, **kwargs)
-        # disable the read until client logger
-        self.logger.disabled = True
         self.log = setup_logger(
             __name__,
             level=logging.INFO,

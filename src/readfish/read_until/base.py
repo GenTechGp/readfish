@@ -126,7 +126,9 @@ class ReadUntilClient(object):
         calibrated_signal: bool = False,
         mk_credentials: grpc.ChannelCredentials = None,
     ):
-        self.logger = logging.getLogger("ReadUntil")
+        # A child of the "readfish" logger, so messages reach readfish's log
+        #    handlers (console and --log-file) and follow its --log-level.
+        self.logger = logging.getLogger("readfish.read_until")
 
         self.mk_host = mk_host
         self.mk_grpc_port = mk_port
@@ -146,7 +148,7 @@ class ReadUntilClient(object):
             )
         except:
             # FIXME: Broad exception
-            logging.error(
+            self.logger.error(
                 "Failed to connect to read until at %s: %s",
                 self.mk_host,
                 self.mk_grpc_port,
