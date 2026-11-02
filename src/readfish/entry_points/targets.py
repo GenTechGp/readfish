@@ -83,6 +83,7 @@ This prevents trying to unblock reads of unknown length.
 # Core imports
 from __future__ import annotations
 import argparse
+from collections import Counter
 import traceback
 from packaging.version import Version
 import logging
@@ -132,6 +133,49 @@ def _positive_seconds(value: str) -> float:
     if not seconds > 0:
         raise argparse.ArgumentTypeError(f"must be greater than 0, got {value}")
     return seconds
+
+
+def _timed(iterable, times: dict, key: str):
+    """Yield the items of ``iterable`` unchanged and in order, adding the
+    seconds spent getting them to ``times[key]`` and the seconds spent getting
+    the first one to ``times[key + "_first"]``.
+    """
+    iterator = iter(iterable)
+    first = True
+    while True:
+        started = timer()
+        try:
+            item = next(iterator)
+        except StopIteration:
+            times[key] += timer() - started
+            return
+        elapsed = timer() - started
+        times[key] += elapsed
+        if first:
+            times[key + "_first"] += elapsed
+            first = False
+        yield item
+
+
+def _loop_timing(times: dict, total: float) -> str:
+    """Milliseconds per main loop stage from the ``times`` collected in
+    Analysis.run. Basecalling and mapping are lazy generators: the aligner
+    pulls basecall results while the loop pulls aligned results, so map time
+    is the time getting aligned results minus the basecall time within it.
+    With mappy_rs, worker threads align reads while basecall results are still
+    being pulled, so map is only the wait after the last basecall result.
+    """
+    basecall = times["basecall_call"] + times["basecall"]
+    map_ = times["map_call"] + times["aligns"] - times["basecall"]
+    decide = times["loop"] - times["aligns"]
+    other = total - times["chunks"] - basecall - map_ - decide - times["actions"]
+    return (
+        f"Loop ms: chunks={times['chunks'] * 1000:.1f}, "
+        f"basecall={basecall * 1000:.1f} "
+        f"(first={times['basecall_first'] * 1000:.1f}), "
+        f"map={map_ * 1000:.1f}, decide={decide * 1000:.1f}, "
+        f"actions={times['actions'] * 1000:.1f}, other={other * 1000:.1f}"
+    )
 
 
 _help = "Run targeted sequencing"
@@ -515,14 +559,23 @@ class Analysis:
             unblock_batch_action_list = []
             stop_receiving_action_list = []
 
+            # Seconds per stage of this loop, for the batch performance line
+            times = Counter()
+            started = timer()
             chunks = self.client.get_read_chunks(self.client.channel_count, last=True)
+            times["chunks"] = timer() - started
+            started = timer()
             calls = self.caller.basecall(
                 chunks, self.client.signal_dtype, self.client.calibration_values
             )
-            aligns = self.mapper.map_reads(calls)
+            times["basecall_call"] = timer() - started
+            started = timer()
+            aligns = self.mapper.map_reads(_timed(calls, times, "basecall"))
+            times["map_call"] = timer() - started
 
             #######################################################################
-            for result in aligns:
+            loop_started = timer()
+            for result in _timed(aligns, times, "aligns"):
                 number_reads += 1
                 control, condition = self.conf.get_conditions(
                     result.channel, result.barcode
@@ -572,19 +625,26 @@ class Analysis:
                     overridden_action_name=overridden_action_name,
                 )
 
+            times["loop"] = timer() - loop_started
+
             #######################################################################
             # Compile actions to be sent
+            started = timer()
             self.client.unblock_read_batch(
                 unblock_batch_action_list, duration=self.unblock_duration
             )
             self.client.stop_receiving_batch(stop_receiving_action_list)
+            times["actions"] = timer() - started
 
             t1 = timer()
             if number_reads > 0:
                 self.loop_statistics.add_batch_performance(
                     number_of_reads=number_reads, batch_time=t1 - t0
                 )
-                self.logger.info(self.loop_statistics.get_batch_performance())
+                self.logger.info(
+                    f"{self.loop_statistics.get_batch_performance()}; "
+                    f"{_loop_timing(times, t1 - t0)}"
+                )
 
             # limit the rate at which we make requests
             if t0 + self.throttle > t1:
