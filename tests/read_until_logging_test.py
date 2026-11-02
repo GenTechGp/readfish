@@ -232,3 +232,34 @@ def test_stream_health_logging(monkeypatch, readfish_handler):
     stopped = check(1122)
     assert len(stopped) == 1 and "read stream thread has stopped" in stopped[0]
     assert check(1200) == []  # logged once
+
+
+def test_unknown_enum_values_do_not_raise(monkeypatch, readfish_handler):
+    """A newer MinKNOW may send states this minknow_api does not know; logging
+    them must not break the main loop."""
+    import readfish._read_until_client as ru
+
+    info = acquisition_pb2.AcquisitionRunInfo()
+    info.state = 99
+    info.stop_reason = 98
+    client = RUClient.__new__(RUClient)
+    client.log = logging.getLogger("readfish._read_until_client")
+    client.connection = SimpleNamespace(
+        acquisition=SimpleNamespace(get_acquisition_info=lambda: info)
+    )
+    client.current_acquisition_state = None
+    client.set_acquisition_state()
+    assert client.current_acquisition_state == 99
+    assert readfish_handler.records[-1].getMessage() == (
+        "Acquisition state changed to UNKNOWN(99) (stop reason UNKNOWN(98))"
+    )
+
+    client.current_protocol_phase = 97
+    client._process_thread = FakeThread()
+    client._process_thread.alive = False
+    client.last_message_time = 0.0
+    client._stream_stopped_logged = False
+    client.log_stream_health()
+    assert "protocol phase UNKNOWN(97), acquisition state UNKNOWN(99)" in (
+        readfish_handler.records[-1].getMessage()
+    )

@@ -41,6 +41,17 @@ LOOPABLE_PROTOCOL_PHASES = {
 }
 #  Timeout in seconds for the run folder to appear
 TIMEOUT = 120
+
+
+def _enum_name(enum_type, value) -> str:
+    """Name of a protobuf enum value for log messages; never raises, so a value
+    unknown to this minknow_api version cannot break the caller."""
+    try:
+        return enum_type.Name(value)
+    except (ValueError, TypeError):
+        return f"UNKNOWN({value})"
+
+
 # Seconds without a message on the read stream before it is logged as silent
 STREAM_SILENCE = 30
 
@@ -180,27 +191,20 @@ class RUClient(ReadUntilClient):
             return
         if info.state != self.current_acquisition_state:
             stop_reason = (
-                f" (stop reason {AcquisitionStopReason.Name(info.stop_reason)})"
+                f" (stop reason {_enum_name(AcquisitionStopReason, info.stop_reason)})"
                 if info.stop_reason != AcquisitionStopReason.STOPPED_NOT_SET
                 else ""
             )
             self.log.info(
-                f"Acquisition state changed to {AcquisitionState.Name(info.state)}{stop_reason}"
+                f"Acquisition state changed to {_enum_name(AcquisitionState, info.state)}"
+                f"{stop_reason}"
             )
         self.current_acquisition_state = info.state
 
     def _run_state_names(self) -> str:
         """The last seen protocol phase and acquisition state, for log messages."""
-        phase = (
-            protocol_service.ProtocolPhase.Name(self.current_protocol_phase)
-            if self.current_protocol_phase is not None
-            else "unknown"
-        )
-        acquisition = (
-            AcquisitionState.Name(self.current_acquisition_state)
-            if self.current_acquisition_state is not None
-            else "unknown"
-        )
+        phase = _enum_name(protocol_service.ProtocolPhase, self.current_protocol_phase)
+        acquisition = _enum_name(AcquisitionState, self.current_acquisition_state)
         return f"protocol phase {phase}, acquisition state {acquisition}"
 
     def log_stream_health(self) -> None:
