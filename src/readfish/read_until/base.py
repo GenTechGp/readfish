@@ -7,6 +7,7 @@ connection point between the read_until_api and MinKNOW.
 import grpc
 import logging
 import queue
+import statistics
 import time
 import uuid
 from collections import Counter, defaultdict, namedtuple
@@ -60,6 +61,13 @@ def _response_summary(counter) -> str:
         return repr(counter)
 
 
+def _min_median_max(values):
+    """(min, median, max) of ``values``, or NA for each if empty."""
+    if not values:
+        return ("NA", "NA", "NA")
+    return (min(values), statistics.median(values), max(values))
+
+
 CALIBRATION = namedtuple("calibration", "scaling offset")
 
 
@@ -80,6 +88,31 @@ ALLOWED_MIN_CHUNK_SIZE = 0
 DEFAULT_PREFILTER_CLASSES = {"strand", "adapter"}
 # Default seconds between the read stream's interval update log lines
 DEFAULT_INTERVAL_UPDATE_SECS = 60 * 15
+# Columns of the per-message read stream log (targets --stream-log). Samples
+#    behind are acquired minus each chunk's start, or minus its end
+#    (chunk_start_sample + chunk_length), over the message's chunks.
+STREAM_LOG_FIELDS = (
+    "recv_time",
+    "mk_seconds_since_start",
+    "mk_samples_since_start",
+    "progress_rpc_ms",
+    "acquired",
+    "processed",
+    "n_chunks",
+    "n_dropped",
+    "behind_start_min",
+    "behind_start_median",
+    "behind_start_max",
+    "behind_end_min",
+    "behind_end_median",
+    "behind_end_max",
+    "n_responses",
+    "success",
+    "failed_read_finished",
+    "failed_read_too_long",
+    "other",
+    "queue_length",
+)
 
 
 class ReadUntilClient(object):
@@ -148,6 +181,11 @@ class ReadUntilClient(object):
 
     # Seconds between the read stream's interval update log lines
     log_interval_secs = DEFAULT_INTERVAL_UPDATE_SECS
+    # Logger for one STREAM_LOG_FIELDS row per stream message; None (the
+    #    default) writes nothing
+    stream_logger = None
+    # Whether a failed stream log row has been logged, so it is logged once
+    _stream_log_failed = False
 
     def __init__(
         self,
@@ -652,7 +690,13 @@ class ReadUntilClient(object):
                     action_type = self.sent_actions[response.action_id]
                     response_counter[action_type][response.response] += 1
 
+            stream_log = self.stream_logger is not None
+            if stream_log:
+                dropped_before = sum(prefilter_dropped.values())
+                progress_called = time.perf_counter()
             progress = self.aquisition_progress
+            if stream_log:
+                progress_secs = time.perf_counter() - progress_called
             for read_channel in reads_chunk.channels:
                 read_count += 1
                 read = reads_chunk.channels[read_channel]
@@ -681,6 +725,14 @@ class ReadUntilClient(object):
                     self.data_queue[read_channel] = read
                 else:
                     prefilter_dropped[tuple(read.chunk_classifications)] += 1
+
+            if stream_log:
+                self._log_stream_message(
+                    reads_chunk,
+                    progress,
+                    progress_secs,
+                    sum(prefilter_dropped.values()) - dropped_before,
+                )
 
             now = time.time()
             log_interval_secs = self.log_interval_secs
@@ -724,6 +776,53 @@ class ReadUntilClient(object):
                 raw_data_bytes = 0
                 prefilter_dropped = Counter()
                 last_msg_time = now
+
+    def _log_stream_message(self, reads_chunk, progress, progress_secs, n_dropped):
+        """Write one STREAM_LOG_FIELDS row for a stream message to
+        ``stream_logger``. Never raises: the first failure is logged as a
+        warning, and rows that fail are skipped.
+        """
+        try:
+            acquired = progress.acquired
+            behind_start = []
+            behind_end = []
+            for read in reads_chunk.channels.values():
+                start = read.chunk_start_sample
+                behind_start.append(acquired - start)
+                behind_end.append(acquired - start - read.chunk_length)
+            responses = Counter(r.response for r in reads_chunk.action_responses)
+            n_responses = sum(responses.values())
+            response_type = data_pb2.GetLiveReadsResponse.ActionResponse
+            success = responses[response_type.SUCCESS]
+            finished = responses[response_type.FAILED_READ_FINISHED]
+            too_long = responses[response_type.FAILED_READ_TOO_LONG]
+            row = (
+                f"{self.last_message_time:.6f}",
+                reads_chunk.seconds_since_start,
+                reads_chunk.samples_since_start,
+                f"{progress_secs * 1000:.3f}",
+                acquired,
+                progress.processed,
+                len(behind_start),
+                n_dropped,
+                *_min_median_max(behind_start),
+                *_min_median_max(behind_end),
+                n_responses,
+                success,
+                finished,
+                too_long,
+                n_responses - success - finished - too_long,
+                self.queue_length,
+            )
+            self.stream_logger.debug("\t".join(map(str, row)))
+        except Exception:
+            if not self._stream_log_failed:
+                self._stream_log_failed = True
+                self.logger.warning(
+                    "Could not write a read stream log row; rows that fail are "
+                    "skipped and not logged again.",
+                    exc_info=True,
+                )
 
     def _prefilter_drop_summary(self, dropped) -> str:
         """Prefilter drop counts with classification names, most first, for log

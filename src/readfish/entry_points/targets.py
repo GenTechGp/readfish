@@ -94,7 +94,8 @@ from typing import Any
 # Third party imports
 from readfish.read_until.read_cache import AccumulatingCache
 from readfish.read_until import ReadUntilClient
-from readfish.read_until.base import DEFAULT_INTERVAL_UPDATE_SECS
+from readfish.read_until.base import DEFAULT_INTERVAL_UPDATE_SECS, STREAM_LOG_FIELDS
+from readfish._loggers import setup_logger
 from minknow_api import protocol_service
 
 # Library
@@ -168,6 +169,15 @@ _cli = DEVICE_BASE_ARGS + (
             default=DEFAULT_INTERVAL_UPDATE_SECS,
             type=_positive_seconds,
             metavar="SECONDS",
+        ),
+    ),
+    (
+        "--stream-log",
+        dict(
+            help="Write one row per MinKNOW read stream message (timing, "
+            "samples behind, action responses) to <run_id>_readfish_stream.tsv. "
+            "Default disabled.",
+            action="store_true",
         ),
     ),
 )
@@ -651,6 +661,15 @@ If there isn't a newer version of readfish and readfish is failing, please open 
         },
     )
     read_until_client.log_interval_secs = args.interval_update_seconds
+    if args.stream_log:
+        run_id = read_until_client.connection.protocol.get_run_info().run_id
+        stream_log_name = f"{run_id}_readfish_stream.tsv"
+        read_until_client.stream_logger = setup_logger(
+            name="read_stream_stats",
+            header="\t".join(STREAM_LOG_FIELDS),
+            log_file=stream_log_name,
+        )
+        logger.info(f"Writing read stream log to {stream_log_name}")
 
     # Load TOML configuration
     conf = Conf.from_file(args.toml, read_until_client.channel_count, logger=logger)
