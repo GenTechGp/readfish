@@ -206,13 +206,13 @@ class ReadUntilClient(object):
         # When there is no run on, MinKNOW only returns a subset of read classifications, and our prefilter classes are not amongst them.
         # This would then throw an uniformative KeyError. We now just carry on, and get to the point where we try to query about the run
         # Which raises a more informative gRPC error instead.
-        # TODO - log the missing strands
         self.strand_classes = set(
             self.lookup_read_class.get(x, f"{x}_classification_unavailable")
             for x in self.prefilter_classes
         )
 
-        self.logger.debug("Strand-like classes are %s.", self.strand_classes)
+        if self.filter_strands:
+            self._log_prefilter_classes()
 
         if calibrated_signal:
             self.calibration = data_pb2.GetLiveReadsRequest.CALIBRATED
@@ -225,6 +225,37 @@ class ReadUntilClient(object):
         self._process_thread = None
         self.running = Event()
         self.reset()
+
+    def _log_prefilter_classes(self):
+        """Log the prefilter classes with their MinKNOW ids, and warn about any
+        missing from MinKNOW's read classifications: the prefilter can never
+        match those, so chunks classified under them are dropped silently.
+        """
+        try:
+            found = {
+                name: self.lookup_read_class[name]
+                for name in self.prefilter_classes
+                if name in self.lookup_read_class
+            }
+            missing = sorted(
+                (name for name in self.prefilter_classes if name not in found),
+                key=str,
+            )
+            self.logger.info(
+                "Prefilter classes (MinKNOW ids): %s.",
+                ", ".join(f"{n}={i}" for n, i in sorted(found.items(), key=str))
+                or "none",
+            )
+            if missing:
+                self.logger.warning(
+                    "MinKNOW has no read classification for prefilter class(es) %s, "
+                    "so the prefilter cannot match them. MinKNOW's classifications "
+                    "are: %s.",
+                    ", ".join(map(str, missing)),
+                    ", ".join(sorted(map(str, self.lookup_read_class))) or "none",
+                )
+        except Exception:
+            self.logger.exception("Could not log the prefilter classes.")
 
     def run(self, **kwargs):
         """Start the Read Until analysis.

@@ -263,3 +263,78 @@ def test_unknown_enum_values_do_not_raise(monkeypatch, readfish_handler):
     assert "protocol phase UNKNOWN(97), acquisition state UNKNOWN(99)" in (
         readfish_handler.records[-1].getMessage()
     )
+
+
+def make_client_with_classifications(monkeypatch, classifications, **kwargs):
+    """Run ReadUntilClient.__init__ against a fake MinKNOW whose read
+    classification map is ``classifications`` (name -> id)."""
+    device = SimpleNamespace(
+        get_flow_cell_info=lambda: SimpleNamespace(channel_count=2),
+        get_calibration=lambda **kw: SimpleNamespace(
+            pa_ranges=[1.0, 1.0], offsets=[0.0, 0.0], digitisation=1
+        ),
+    )
+    analysis_configuration = SimpleNamespace(
+        get_read_classifications=lambda: SimpleNamespace(
+            read_classifications={i: name for name, i in classifications.items()}
+        )
+    )
+    connection = SimpleNamespace(
+        device=device, analysis_configuration=analysis_configuration
+    )
+    monkeypatch.setattr(base, "Connection", lambda **kw: connection)
+    numpy_types = SimpleNamespace(calibrated_signal="f4", uncalibrated_signal="i2")
+    monkeypatch.setattr(base, "get_numpy_types", lambda conn: numpy_types)
+    return base.ReadUntilClient(**kwargs)
+
+
+def prefilter_records(handler):
+    return [
+        (r.levelno, r.getMessage())
+        for r in handler.records
+        if r.name == "readfish.read_until" and "prefilter class" in r.getMessage().lower()
+    ]
+
+
+def test_prefilter_classes_logged(monkeypatch, readfish_handler):
+    client = make_client_with_classifications(
+        monkeypatch,
+        {"strand": 3, "adapter": 1, "pore": 2},
+        prefilter_classes={"strand", "adapter"},
+    )
+    assert client.strand_classes == {3, 1}
+    assert prefilter_records(readfish_handler) == [
+        (logging.INFO, "Prefilter classes (MinKNOW ids): adapter=1, strand=3.")
+    ]
+
+
+def test_missing_prefilter_classes_warned(monkeypatch, readfish_handler):
+    client = make_client_with_classifications(
+        monkeypatch,
+        {"strand": 3, "pore": 2},
+        prefilter_classes={"strand", "adapter", "short_strand"},
+    )
+    # Behaviour unchanged: missing classes still become placeholders.
+    assert client.strand_classes == {
+        3,
+        "adapter_classification_unavailable",
+        "short_strand_classification_unavailable",
+    }
+    assert prefilter_records(readfish_handler) == [
+        (logging.INFO, "Prefilter classes (MinKNOW ids): strand=3."),
+        (
+            logging.WARNING,
+            "MinKNOW has no read classification for prefilter class(es) "
+            "adapter, short_strand, so the prefilter cannot match them. "
+            "MinKNOW's classifications are: pore, strand.",
+        ),
+    ]
+
+
+def test_prefilter_classes_not_logged_without_filtering(
+    monkeypatch, readfish_handler
+):
+    make_client_with_classifications(
+        monkeypatch, {"pore": 2}, filter_strands=False, prefilter_classes={"strand"}
+    )
+    assert prefilter_records(readfish_handler) == []
