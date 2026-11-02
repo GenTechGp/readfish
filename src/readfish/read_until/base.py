@@ -432,6 +432,7 @@ class ReadUntilClient(object):
 
     def _run(self, **kwargs):
         self.running.set()
+        stream_start = time.time()
         # .get_live_reads() takes an iterable of requests and generates
         #    raw data chunks and responses to our requests: the iterable
         #    thereby controls the lifetime of the stream. ._runner() as
@@ -445,6 +446,9 @@ class ReadUntilClient(object):
         #    everything and anything.
         try:
             self._process_reads(reads)
+            if self.is_running:
+                # We did not ask for this (no reset): MinKNOW ended the stream
+                self.logger.warning("Read stream closed by MinKNOW without an error.")
         except grpc.RpcError as exc:
             code = exc.code()
             if code in {code.CANCELLED, code.ABORTED, code.FAILED_PRECONDITION}:
@@ -456,6 +460,16 @@ class ReadUntilClient(object):
 
         # Signal to the server that we are done with the stream.
         reads.cancel()
+
+        stream_secs = time.time() - stream_start
+        if self.is_running:
+            self.logger.error(
+                "Read stream thread exited after %.0f s while readfish is still"
+                " running: no more reads will be received.",
+                stream_secs,
+            )
+        else:
+            self.logger.info("Read stream thread exited after %.0f s.", stream_secs)
 
     def _runner(
         self,
