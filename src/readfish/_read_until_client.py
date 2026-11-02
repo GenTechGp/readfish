@@ -8,7 +8,7 @@ import time
 
 from pathlib import Path
 
-from minknow_api.acquisition_pb2 import AcquisitionState
+from minknow_api.acquisition_pb2 import AcquisitionState, AcquisitionStopReason
 from minknow_api import protocol_service, acquisition_service
 from readfish.read_until.base import ReadUntilClient
 from readfish._loggers import setup_logger
@@ -163,9 +163,7 @@ class RUClient(ReadUntilClient):
     def set_acquisition_state(self):
         """Set the acquisition state on the class. Gets the state over the API."""
         try:
-            self.current_acquisition_state = (
-                self.connection.acquisition.get_acquisition_info().state
-            )
+            info = self.connection.acquisition.get_acquisition_info()
         except RpcError as e:
             if self.phase_errors < self.max_phase_errors:
                 self.log.info(f"Got RPC exception\n{e}")
@@ -173,6 +171,17 @@ class RUClient(ReadUntilClient):
                 self.phase_errors += 1
             else:
                 raise SystemExit(1)
+            return
+        if info.state != self.current_acquisition_state:
+            stop_reason = (
+                f" (stop reason {AcquisitionStopReason.Name(info.stop_reason)})"
+                if info.stop_reason != AcquisitionStopReason.STOPPED_NOT_SET
+                else ""
+            )
+            self.log.info(
+                f"Acquisition state changed to {AcquisitionState.Name(info.state)}{stop_reason}"
+            )
+        self.current_acquisition_state = info.state
 
     def wait_for_minknow_folder(self, timeout: int):
         """

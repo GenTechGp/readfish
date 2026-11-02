@@ -1,12 +1,15 @@
-"""Messages from the vendored read until client must reach readfish's log handlers."""
+"""Log messages about the read stream and run state must reach readfish's log handlers."""
 
 import logging
 from threading import Event
+from types import SimpleNamespace
 
 import grpc
 import pytest
+from minknow_api import acquisition_pb2
 
 import readfish.read_until.base as base
+from readfish._read_until_client import RUClient
 
 
 class ListHandler(logging.Handler):
@@ -125,3 +128,45 @@ def test_stream_ends_after_reset(run_stream):
     client, stream, lines = run_stream(reset)
     assert [lvl for lvl, _ in lines] == [logging.INFO]
     assert lines[0][1].startswith("Read stream thread exited after")
+
+
+def test_acquisition_state_changes_logged(readfish_handler):
+    A = acquisition_pb2.AcquisitionState
+    states = [
+        acquisition_pb2.AcquisitionRunInfo(state=A.ACQUISITION_RUNNING),
+        acquisition_pb2.AcquisitionRunInfo(state=A.ACQUISITION_RUNNING),
+        acquisition_pb2.AcquisitionRunInfo(state=A.ACQUISITION_PAUSED),
+        acquisition_pb2.AcquisitionRunInfo(state=A.ACQUISITION_RUNNING),
+        acquisition_pb2.AcquisitionRunInfo(
+            state=A.ACQUISITION_FINISHING,
+            stop_reason=acquisition_pb2.AcquisitionStopReason.STOPPED_USER_REQUESTED,
+        ),
+    ]
+
+    class FakeAcquisition:
+        def get_acquisition_info(self):
+            return states.pop(0)
+
+    client = RUClient.__new__(RUClient)
+    client.log = logging.getLogger("readfish._read_until_client")
+    client.connection = SimpleNamespace(acquisition=FakeAcquisition())
+    client.current_acquisition_state = None
+    seen = []
+    while states:
+        client.set_acquisition_state()
+        seen.append(client.current_acquisition_state)
+
+    assert seen == [
+        A.ACQUISITION_RUNNING,
+        A.ACQUISITION_RUNNING,
+        A.ACQUISITION_PAUSED,
+        A.ACQUISITION_RUNNING,
+        A.ACQUISITION_FINISHING,
+    ]
+    assert [r.getMessage() for r in readfish_handler.records] == [
+        "Acquisition state changed to ACQUISITION_RUNNING",
+        "Acquisition state changed to ACQUISITION_PAUSED",
+        "Acquisition state changed to ACQUISITION_RUNNING",
+        "Acquisition state changed to ACQUISITION_FINISHING"
+        " (stop reason STOPPED_USER_REQUESTED)",
+    ]
