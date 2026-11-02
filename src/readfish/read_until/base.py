@@ -31,6 +31,35 @@ def nice_join(seq, sep=", ", conjunction="or"):
         return "{} {} {}".format(sep.join(seq[:-1]), conjunction, seq[-1])
 
 
+def _enum_name(enum_type, value) -> str:
+    """Name of a protobuf enum value for log messages; never raises, so a value
+    unknown to this minknow_api version cannot break the caller."""
+    try:
+        return enum_type.Name(value)
+    except (ValueError, TypeError):
+        return f"UNKNOWN({value})"
+
+
+def _response_summary(counter) -> str:
+    """Action responses by action type and response name, for log messages;
+    never raises."""
+    try:
+        response_type = data_pb2.GetLiveReadsResponse.ActionResponse.Response
+        return "; ".join(
+            "{}: {}".format(
+                action_type,
+                ", ".join(
+                    f"{_enum_name(response_type, response)}={n}"
+                    for response, n in sorted(responses.items(), key=str)
+                ),
+            )
+            for action_type, responses in sorted(counter.items(), key=str)
+            if responses
+        ) or "none"
+    except Exception:
+        return repr(counter)
+
+
 CALIBRATION = namedtuple("calibration", "scaling offset")
 
 
@@ -592,6 +621,8 @@ class ReadUntilClient(object):
         :param reads: gRPC data stream iterable as produced by get_live_reads().
         """
         response_counter = defaultdict(Counter)
+        # response_counter as of the last interval update, to log per-interval counts
+        logged_responses = {}
 
         unique_reads = set()
 
@@ -657,7 +688,20 @@ class ReadUntilClient(object):
                     self.missed_reads,
                     self.missed_chunks,
                 )
-                self.logger.info("Response summary: %s", response_counter)
+                interval_responses = {
+                    action_type: responses
+                    - logged_responses.get(action_type, Counter())
+                    for action_type, responses in response_counter.items()
+                }
+                self.logger.info(
+                    "Response summary: this interval %s. Cumulative %s.",
+                    _response_summary(interval_responses),
+                    _response_summary(response_counter),
+                )
+                logged_responses = {
+                    action_type: Counter(responses)
+                    for action_type, responses in response_counter.items()
+                }
 
                 read_count = 0
                 samples_behind = 0

@@ -1,6 +1,7 @@
 """Log messages about the read stream and run state must reach readfish's log handlers."""
 
 import logging
+from collections import Counter
 from threading import Event
 from types import SimpleNamespace
 
@@ -338,3 +339,71 @@ def test_prefilter_classes_not_logged_without_filtering(
         monkeypatch, {"pore": 2}, filter_strands=False, prefilter_classes={"strand"}
     )
     assert prefilter_records(readfish_handler) == []
+
+
+def test_response_summary_named_per_interval_and_cumulative(
+    monkeypatch, readfish_handler
+):
+    Response = base.data_pb2.GetLiveReadsResponse.ActionResponse.Response
+    now = [1000.0]
+    monkeypatch.setattr(base.time, "time", lambda: now[0])
+
+    client = base.ReadUntilClient.__new__(base.ReadUntilClient)
+    client.logger = logging.getLogger("readfish.read_until")
+    client.running = Event()
+    client.running.set()
+    progress = SimpleNamespace(raw_per_channel=SimpleNamespace(acquired=100))
+    client.connection = SimpleNamespace(
+        acquisition=SimpleNamespace(get_progress=lambda: progress)
+    )
+    client.one_chunk = False
+    client.filter_strands = False
+    client.data_queue = base.ReadCache(size=2)
+    client.sent_actions = {"s1": "stop_further_data", "s2": "stop_further_data",
+                           "u1": "unblock", "s3": "stop_further_data",
+                           "u2": "unblock"}
+
+    def message(*responses):
+        read = SimpleNamespace(
+            id="r", chunk_start_sample=0, raw_data=b"", chunk_classifications=[]
+        )
+        return SimpleNamespace(
+            action_responses=[
+                SimpleNamespace(action_id=a, response=r) for a, r in responses
+            ],
+            channels={1: read},
+        )
+
+    def messages():
+        yield message(("s1", Response.SUCCESS), ("s2", Response.FAILED_READ_FINISHED),
+                      ("u1", Response.SUCCESS))
+        now[0] += 60 * 15 + 1
+        yield message()
+        yield message(("s3", Response.SUCCESS), ("u2", Response.FAILED_READ_TOO_LONG))
+        now[0] += 60 * 15 + 1
+        yield message()
+
+    client._process_reads(messages())
+
+    summaries = [
+        r.getMessage()
+        for r in readfish_handler.records
+        if r.getMessage().startswith("Response summary")
+    ]
+    assert summaries == [
+        "Response summary: this interval stop_further_data: SUCCESS=1, "
+        "FAILED_READ_FINISHED=1; unblock: SUCCESS=1. Cumulative "
+        "stop_further_data: SUCCESS=1, FAILED_READ_FINISHED=1; unblock: SUCCESS=1.",
+        "Response summary: this interval stop_further_data: SUCCESS=1; "
+        "unblock: FAILED_READ_TOO_LONG=1. Cumulative stop_further_data: "
+        "SUCCESS=2, FAILED_READ_FINISHED=1; unblock: SUCCESS=1, "
+        "FAILED_READ_TOO_LONG=1.",
+    ]
+
+
+def test_response_summary_never_raises():
+    assert base._response_summary({}) == "none"
+    assert base._response_summary({"unblock": Counter({99: 2})}) == (
+        "unblock: UNKNOWN(99)=2"
+    )
+    assert base._response_summary(None) == "None"

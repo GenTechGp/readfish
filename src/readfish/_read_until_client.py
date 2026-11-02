@@ -10,7 +10,7 @@ from pathlib import Path
 
 from minknow_api.acquisition_pb2 import AcquisitionState, AcquisitionStopReason
 from minknow_api import protocol_service, acquisition_service
-from readfish.read_until.base import ReadUntilClient
+from readfish.read_until.base import ReadUntilClient, _enum_name
 from readfish._loggers import setup_logger
 from grpc import RpcError
 
@@ -41,15 +41,6 @@ LOOPABLE_PROTOCOL_PHASES = {
 }
 #  Timeout in seconds for the run folder to appear
 TIMEOUT = 120
-
-
-def _enum_name(enum_type, value) -> str:
-    """Name of a protobuf enum value for log messages; never raises, so a value
-    unknown to this minknow_api version cannot break the caller."""
-    try:
-        return enum_type.Name(value)
-    except (ValueError, TypeError):
-        return f"UNKNOWN({value})"
 
 
 # Seconds without a message on the read stream before it is logged as silent
