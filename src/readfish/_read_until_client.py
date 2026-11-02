@@ -41,6 +41,8 @@ LOOPABLE_PROTOCOL_PHASES = {
 }
 #  Timeout in seconds for the run folder to appear
 TIMEOUT = 120
+# Seconds without a message on the read stream before it is logged as silent
+STREAM_SILENCE = 30
 
 
 class RUClient(ReadUntilClient):
@@ -61,6 +63,10 @@ class RUClient(ReadUntilClient):
         self.current_protocol_state = None
 
         self.current_acquisition_state = None
+        # For log_stream_health: time of the last message before a logged silence,
+        #    and whether a stopped read stream thread has been logged
+        self._stream_silent_since = None
+        self._stream_stopped_logged = False
         self.phase_errors = 0
         self.current_protocol = 0
         self.max_phase_errors = 1
@@ -182,6 +188,52 @@ class RUClient(ReadUntilClient):
                 f"Acquisition state changed to {AcquisitionState.Name(info.state)}{stop_reason}"
             )
         self.current_acquisition_state = info.state
+
+    def _run_state_names(self) -> str:
+        """The last seen protocol phase and acquisition state, for log messages."""
+        phase = (
+            protocol_service.ProtocolPhase.Name(self.current_protocol_phase)
+            if self.current_protocol_phase is not None
+            else "unknown"
+        )
+        acquisition = (
+            AcquisitionState.Name(self.current_acquisition_state)
+            if self.current_acquisition_state is not None
+            else "unknown"
+        )
+        return f"protocol phase {phase}, acquisition state {acquisition}"
+
+    def log_stream_health(self) -> None:
+        """Log, once each, when no message has arrived on the read stream for
+        ``STREAM_SILENCE`` seconds, when messages resume, and when the read
+        stream thread has stopped while readfish carries on. Logging only.
+
+        Meant to be called from the main loop.
+        """
+        if self._process_thread is None or self.last_message_time is None:
+            return
+        if not self._process_thread.is_alive():
+            if not self._stream_stopped_logged:
+                self._stream_stopped_logged = True
+                self.log.error(
+                    "The read stream thread has stopped but readfish is still running:"
+                    f" no data is being received from MinKNOW ({self._run_state_names()})."
+                )
+            return
+        last = self.last_message_time
+        if self._stream_silent_since is None:
+            silence = time.time() - last
+            if silence > STREAM_SILENCE:
+                self._stream_silent_since = last
+                self.log.info(
+                    f"No data from MinKNOW for {silence:.0f} s ({self._run_state_names()})."
+                )
+        elif last > self._stream_silent_since:
+            self.log.info(
+                f"Data from MinKNOW resumed after {last - self._stream_silent_since:.0f} s"
+                f" ({self._run_state_names()})."
+            )
+            self._stream_silent_since = None
 
     def wait_for_minknow_folder(self, timeout: int):
         """

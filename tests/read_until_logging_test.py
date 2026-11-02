@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import grpc
 import pytest
-from minknow_api import acquisition_pb2
+from minknow_api import acquisition_pb2, protocol_service
 
 import readfish.read_until.base as base
 from readfish._read_until_client import RUClient
@@ -170,3 +170,65 @@ def test_acquisition_state_changes_logged(readfish_handler):
         "Acquisition state changed to ACQUISITION_FINISHING"
         " (stop reason STOPPED_USER_REQUESTED)",
     ]
+
+
+def test_messages_update_last_message_time():
+    client = base.ReadUntilClient.__new__(base.ReadUntilClient)
+    client.logger = logging.getLogger("readfish.read_until")
+    client.running = Event()
+    client.running.set()
+    progress = SimpleNamespace(raw_per_channel=SimpleNamespace(acquired=0))
+    client.connection = SimpleNamespace(
+        acquisition=SimpleNamespace(get_progress=lambda: progress)
+    )
+    client.last_message_time = None
+    client._process_reads([SimpleNamespace(action_responses=[], channels={})])
+    assert client.last_message_time is not None
+
+
+class FakeThread:
+    def __init__(self):
+        self.alive = True
+
+    def is_alive(self):
+        return self.alive
+
+
+def test_stream_health_logging(monkeypatch, readfish_handler):
+    import readfish._read_until_client as ru
+
+    now = [1000.0]
+    monkeypatch.setattr(ru.time, "time", lambda: now[0])
+    client = RUClient.__new__(RUClient)
+    client.log = logging.getLogger("readfish._read_until_client")
+    client._process_thread = FakeThread()
+    client.last_message_time = 1000.0
+    client._stream_silent_since = None
+    client._stream_stopped_logged = False
+    client.current_protocol_phase = protocol_service.PHASE_PAUSED
+    client.current_acquisition_state = acquisition_pb2.AcquisitionState.ACQUISITION_PAUSED
+
+    def check(at):
+        now[0] = at
+        before = len(readfish_handler.records)
+        client.log_stream_health()
+        return [r.getMessage() for r in readfish_handler.records[before:]]
+
+    assert check(1005) == []  # recent data
+    assert check(1031) == [
+        "No data from MinKNOW for 31 s"
+        " (protocol phase PHASE_PAUSED, acquisition state ACQUISITION_PAUSED)."
+    ]
+    assert check(1100) == []  # still silent: logged once
+    client.last_message_time = 1120.0  # a message arrives
+    client.current_protocol_phase = protocol_service.PHASE_SEQUENCING
+    client.current_acquisition_state = acquisition_pb2.AcquisitionState.ACQUISITION_RUNNING
+    assert check(1120.2) == [
+        "Data from MinKNOW resumed after 120 s"
+        " (protocol phase PHASE_SEQUENCING, acquisition state ACQUISITION_RUNNING)."
+    ]
+    assert check(1121) == []
+    client._process_thread.alive = False
+    stopped = check(1122)
+    assert len(stopped) == 1 and "read stream thread has stopped" in stopped[0]
+    assert check(1200) == []  # logged once

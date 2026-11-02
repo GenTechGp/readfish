@@ -286,6 +286,9 @@ class ReadUntilClient(object):
         self.data_queue = self.CacheType(size=self.cache_size)
         # stores all sent action ids -> unblock/stop
         self.sent_actions = dict()
+        # time.time() of the last message received on the read stream
+        #    (set when the stream is opened)
+        self.last_message_time = None
 
     @property
     def aquisition_progress(self):
@@ -433,6 +436,7 @@ class ReadUntilClient(object):
     def _run(self, **kwargs):
         self.running.set()
         stream_start = time.time()
+        self.last_message_time = stream_start
         # .get_live_reads() takes an iterable of requests and generates
         #    raw data chunks and responses to our requests: the iterable
         #    thereby controls the lifetime of the stream. ._runner() as
@@ -565,6 +569,7 @@ class ReadUntilClient(object):
         raw_data_bytes = 0
         last_msg_time = time.time()
         for reads_chunk in reads:
+            self.last_message_time = time.time()
             if not self.is_running:
                 self.logger.info("Stopping processing of reads due to reset.")
                 break

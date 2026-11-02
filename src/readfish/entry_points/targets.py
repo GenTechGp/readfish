@@ -457,6 +457,8 @@ class Analysis:
 
         while self.client.is_sequencing:
             t0 = timer()
+            # Before the wait below, so it also runs during pauses and mux scans
+            self.client.log_stream_health()
             # Check if we have started readfish before PHASE_SEQUENCING,
             if self.wait_for_sequencing:
                 time.sleep(self.throttle)
