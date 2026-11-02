@@ -424,6 +424,7 @@ def test_interval_update_without_reads_does_not_raise(monkeypatch, readfish_hand
         acquisition=SimpleNamespace(get_progress=lambda: progress)
     )
     client.data_queue = base.ReadCache(size=2)
+    client.filter_strands = True
 
     def messages():
         now[0] += 60 * 15 + 1
@@ -439,3 +440,81 @@ def test_interval_update_without_reads_does_not_raise(monkeypatch, readfish_hand
     assert len(updates) == 1
     assert "0 read sections" in updates[0]
     assert "average 0 samples behind" in updates[0]
+
+
+def run_prefilter_intervals(monkeypatch, filter_strands, intervals):
+    """Run _process_reads over ``intervals``, each a list of chunk
+    classification lists; a message with no reads ends each interval."""
+    now = [1000.0]
+    monkeypatch.setattr(base.time, "time", lambda: now[0])
+
+    client = base.ReadUntilClient.__new__(base.ReadUntilClient)
+    client.logger = logging.getLogger("readfish.read_until")
+    client.running = Event()
+    client.running.set()
+    progress = SimpleNamespace(raw_per_channel=SimpleNamespace(acquired=0))
+    client.connection = SimpleNamespace(
+        acquisition=SimpleNamespace(get_progress=lambda: progress)
+    )
+    client.data_queue = base.ReadCache(size=8)
+    client.one_chunk = False
+    client.filter_strands = filter_strands
+    client.lookup_read_class = {"strand": 1, "pore": 2, "unclassed": 3}
+    client.strand_classes = {1}
+
+    def messages():
+        for chunks in intervals:
+            channels = {
+                channel: SimpleNamespace(
+                    id=f"r{channel}",
+                    chunk_start_sample=0,
+                    raw_data=b"",
+                    chunk_classifications=classes,
+                )
+                for channel, classes in enumerate(chunks, start=1)
+            }
+            yield SimpleNamespace(action_responses=[], channels=channels)
+            now[0] += 60 * 15 + 1
+            yield SimpleNamespace(action_responses=[], channels={})
+
+    client._process_reads(messages())
+    return client
+
+
+def prefilter_drop_records(handler):
+    return [
+        r.getMessage()
+        for r in handler.records
+        if r.getMessage().startswith("Prefilter dropped")
+    ]
+
+
+def test_prefilter_drops_counted_per_interval(monkeypatch, readfish_handler):
+    client = run_prefilter_intervals(
+        monkeypatch,
+        True,
+        [
+            [[1], [2], [2], [3, 2], [], [99], [2]],
+            [[1]],
+        ],
+    )
+    assert prefilter_drop_records(readfish_handler) == [
+        "Prefilter dropped 6 read chunks this interval, by classification: "
+        "pore=3, unclassed+pore=1, none=1, UNKNOWN(99)=1.",
+        "Prefilter dropped 0 read chunks this interval, by classification: none.",
+    ]
+    # Behaviour unchanged: only the strand chunk was queued.
+    assert client.queue_length == 1
+
+
+def test_prefilter_drops_not_logged_without_filtering(monkeypatch, readfish_handler):
+    client = run_prefilter_intervals(monkeypatch, False, [[[1], [2]]])
+    assert prefilter_drop_records(readfish_handler) == []
+    assert client.queue_length == 2
+
+
+def test_prefilter_drop_summary_never_raises():
+    client = base.ReadUntilClient.__new__(base.ReadUntilClient)
+    assert client._prefilter_drop_summary(Counter({(2,): 1})) == "UNKNOWN(2)=1"
+    assert client._prefilter_drop_summary(None) == "None"
+    assert client._prefilter_drop_summary(Counter({2: 1})) == "Counter({2: 1})"

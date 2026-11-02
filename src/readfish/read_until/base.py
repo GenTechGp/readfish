@@ -629,6 +629,8 @@ class ReadUntilClient(object):
         read_count = 0
         samples_behind = 0
         raw_data_bytes = 0
+        # chunks dropped by the prefilter this interval, by chunk classifications
+        prefilter_dropped = Counter()
         last_msg_time = time.time()
         for reads_chunk in reads:
             self.last_message_time = time.time()
@@ -672,6 +674,8 @@ class ReadUntilClient(object):
                 )
                 if not self.filter_strands or strand_like:
                     self.data_queue[read_channel] = read
+                else:
+                    prefilter_dropped[tuple(read.chunk_classifications)] += 1
 
             now = time.time()
             log_interval_secs = 60 * 15  # 15 mins
@@ -702,11 +706,38 @@ class ReadUntilClient(object):
                     action_type: Counter(responses)
                     for action_type, responses in response_counter.items()
                 }
+                if self.filter_strands:
+                    self.logger.info(
+                        "Prefilter dropped %s read chunks this interval, by "
+                        "classification: %s.",
+                        sum(prefilter_dropped.values()),
+                        self._prefilter_drop_summary(prefilter_dropped),
+                    )
 
                 read_count = 0
                 samples_behind = 0
                 raw_data_bytes = 0
+                prefilter_dropped = Counter()
                 last_msg_time = now
+
+    def _prefilter_drop_summary(self, dropped) -> str:
+        """Prefilter drop counts with classification names, most first, for log
+        messages; never raises. A chunk with several classifications is named
+        by joining them with "+"."""
+        try:
+            names = {i: n for n, i in getattr(self, "lookup_read_class", {}).items()}
+            return ", ".join(
+                "{}={}".format(
+                    "+".join(names.get(c, f"UNKNOWN({c})") for c in classes)
+                    or "none",
+                    n,
+                )
+                for classes, n in sorted(
+                    dropped.items(), key=lambda item: item[1], reverse=True
+                )
+            ) or "none"
+        except Exception:
+            return repr(dropped)
 
     def _generate_action(self, read_channel, read_id, action, **params):
         """Returns an action request to be placed on the queue
